@@ -2,6 +2,18 @@
 
 该项目从机械工程 PDF 生成可在 Ansys Zemax OpticStudio 中打开的非序列模型。LangGraph 编排读图、构建、验收和返修。模型通过 Responses API 生成声明式几何方案，并审核从重开的模型取得的证据。MCP 提供局部图纸读取、规格校验、建模、测量和出图。通用适配器通过 ZOSAPI 执行实际建模操作。
 
+## 建模成果
+
+下图来自此前建模运行的 `native_views/axonometric.png`，由重开的 Zemax 模型生成。
+
+| V 形槽 | 双台阶 |
+| --- | --- |
+| ![V 形槽模型等轴图](docs/images/v-groove.png) | ![双台阶模型等轴图](docs/images/double-step.png) |
+
+| 燕尾槽 | 双槽 |
+| --- | --- |
+| ![燕尾槽模型等轴图](docs/images/dovetail.png) | ![双槽模型等轴图](docs/images/twin-slots.png) |
+
 ## Windows 环境
 
 - 安装 Windows 版 OpticStudio，并确认许可证支持 ZOS-API Standalone。已验证的版本是 OpticStudio 2023 R1。
@@ -45,6 +57,18 @@ $env:ZEMAX_GATEWAY_KEY = Read-Host 'API key' -MaskInput
 | audit/ | 模型请求、回复和流水线记录 |
 
 在另一台机器打开模型时，请把 final/apertures 中的 UDA 文件复制到该用户的 Zemax Objects/Apertures 目录，再打开 model.zos。构建机已自动安装当次所用的 UDA。
+
+## 示例流程：从台阶块 PDF 到交付
+
+上面的命令生成 `step_block.pdf` 并启动一次 LangGraph 运行。图纸给出总长 12 mm、左段长 7 mm 且高 5 mm、右段长 5 mm 且高 3 mm，以及 6 mm 的拉伸深度。
+
+1. **预检与读图（`preflight` → `prepare_inputs`）**。Agent 检查运行环境，将当前 PDF 放入任务工作区，读取文本和页面图像。GPT 可以经由 MCP 查看局部标注，将外形、尺寸和假设写入声明式几何方案。
+2. **定方案（`select_strategy` → `prepare_request`）**。GPT 给出建模候选。以台阶块为例，可用六个顶点定义台阶截面，再沿深度方向拉伸 6 mm。LangGraph 将候选方案和本次构建请求传给固定脚本。
+3. **构建和取证（`execute_pipeline`）**。通用适配器调用 ZOSAPI 创建非序列对象，保存 `.zos`，关闭后通过新实例重开，从重开的模型读取参数并采集尺寸、截面和视图。几何和视图是必查项，STEP/STL 导出按需执行。
+4. **审核和返修（`visual_gate` → `inspect_gates`）**。GPT 审核图纸与模型证据。例如检查外形是否为 12 × 5 × 6 mm，并在侧视或截面中检查两级高度和台阶位置。若右段被误做成 5 mm 高，验收失败后 LangGraph 将反馈交给 `repair`，在预算内尝试下一候选或修订方案并重新构建。
+5. **交付（`finalize`）**。通过后在 `final/` 提供可打开的 `model.zos`、依赖轮廓、几何证据、视图和验收报告。尝试用尽后保留日志和失败原因，运行以非零退出码结束。
+
+[LangGraph 状态图实现](agent_langgraph/graph.py)
 
 ## 批量评测
 
