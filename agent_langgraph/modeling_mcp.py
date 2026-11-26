@@ -6,7 +6,11 @@ import math
 import re
 import subprocess
 import sys
+import uuid
 from pathlib import Path
+from typing import Literal
+
+from scripts.pipeline.stepped_bore import expand_stepped_bore
 
 from .pipeline import PIPELINE, digest, read_json, run_script, write_json
 
@@ -18,6 +22,7 @@ def create_server(workspace, filename):
     from mcp.server.fastmcp import FastMCP
 
     server = FastMCP("zemax-modeling")
+    server.tool()(expand_stepped_bore)
     pdf = (workspace / "input" / filename).resolve()
     if pdf.parent != (workspace / "input").resolve():
         raise ValueError("invalid staged PDF")
@@ -110,6 +115,31 @@ def create_server(workspace, filename):
                 "views": {file.name: digest(file) for file in views},
             })
         return read_json(path / "native_geometry_evidence.json")
+
+    @server.tool()
+    def measure_section(attempt: str, axis: Literal["X", "Y", "Z"], coordinate: float) -> dict:
+        """Measure a section normal to the given axis at a model coordinate in mm."""
+        if not math.isfinite(coordinate):
+            raise ValueError("Non-finite section coordinate")
+        path = attempt_dir(attempt)
+        result = read_json(path / "native_result.json")
+        model = path / "model.zos"
+        model_hash = result["model_sha256"]
+        if digest(model) != model_hash:
+            raise ValueError("model changed after build")
+        output = path / f"section_{uuid.uuid4().hex}.json"
+        command = [sys.executable, str(PIPELINE / "collect_native_views.py"), str(model),
+                   str(result["model"]["final_object_id"]), str(output),
+                   "--section", axis, str(coordinate)]
+        with (path / "agent.log").open("a", encoding="utf-8") as log:
+            subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=60, check=True)
+        evidence = read_json(output)
+        if evidence["model_sha256"] != model_hash:
+            raise ValueError("Section evidence does not match the built model")
+        image = output.with_suffix(".png")
+        if image.is_file():
+            evidence["png"] = base64.b64encode(image.read_bytes()).decode("ascii")
+        return evidence
 
     @server.tool()
     def render_model_views(attempt: str) -> dict:

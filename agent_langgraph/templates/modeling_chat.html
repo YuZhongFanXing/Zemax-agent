@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zemax 建模工作台</title>
+<style>
+*{box-sizing:border-box} body{margin:0;background:#eef2f7;color:#152238;font:15px/1.55 Inter,"Microsoft YaHei",sans-serif}
+header{background:#12223a;color:#fff;padding:18px max(24px,calc((100vw - 940px)/2));font-size:19px;font-weight:700;white-space:nowrap}
+main{max-width:988px;margin:auto;padding:24px;display:grid;gap:18px}
+details,.composer,.message{background:white;border:1px solid #d7e1ed;border-radius:12px;padding:18px}
+summary{cursor:pointer;font-weight:650}.settings{display:grid;grid-template-columns:2fr 1.3fr 1fr;gap:12px;margin-top:12px}
+label{display:block;font-weight:600}input,textarea,button{font:inherit}input,textarea{width:100%;padding:10px;border:1px solid #9bafc6;border-radius:8px;color:inherit;background:#fff}
+textarea{resize:vertical;min-height:90px}.drop{display:block;border:1px dashed #7895b9;background:#f3f7fd;text-align:center;padding:13px;border-radius:8px;cursor:pointer;margin-bottom:14px}
+.drop.over,.drop:focus-within{background:#dbeafe;outline:2px solid #2464b8}.drop input{position:absolute;width:1px;height:1px;opacity:0}
+.actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;flex-wrap:wrap}
+button,.button{border:0;border-radius:8px;background:#1957a5;color:#fff;padding:8px 14px;text-decoration:none;cursor:pointer}button:disabled{opacity:.55;cursor:wait}
+#thread{display:grid;gap:12px}.message.user{margin-left:12%;background:#e3edfc}.message p{margin:4px 0;white-space:pre-wrap;overflow-wrap:anywhere}.message img{display:block;width:100%;max-height:540px;object-fit:contain;margin:12px 0;border:1px solid #d7e1ed;border-radius:8px}
+.message code{display:block;overflow-wrap:anywhere;padding:8px;background:#edf2f8}.muted{color:#4a5c74}
+@media(max-width:620px){main{padding:12px}.settings{grid-template-columns:1fr}.message.user{margin-left:5%}}
+</style>
+</head>
+<body>
+<header>Zemax 建模工作台</header>
+<main>
+<form id="chat">
+<details {% if not url or not has_key %}open{% endif %}>
+<summary>API 设置</summary>
+<div class="settings">
+<label>API Base URL<input name="url" type="url" value="{{ url }}" placeholder="https://api.openai.com/v1"></label>
+<label>API Key<input name="key" type="password" autocomplete="off" placeholder="{{ '使用启动环境的 Key' if has_key else '输入 API Key' }}"></label>
+<label>模型<input name="model" value="{{ model }}"></label>
+<label>API 协议<select name="protocol"><option value="auto">自动</option><option value="responses">Responses</option><option value="chat">Chat Completions</option></select></label>
+<label><input name="text_only" type="checkbox" style="width:auto"> Chat 文本模式</label>
+</div>
+</details>
+<br>
+<section class="composer">
+<label class="drop" id="drop"><input type="file" name="pdf" accept=".pdf,application/pdf"><span id="file-label">拖入 PDF 图纸，或点击选择</span></label>
+<label for="prompt">建模要求</label>
+<textarea id="prompt" name="prompt" required maxlength="8000" placeholder="例如：按图纸构建非序列模型，检查槽距和槽深。"></textarea>
+<div class="actions"><span class="muted" id="hint">添加 PDF 后发送建模要求</span><button id="send">发送</button></div>
+</section>
+</form>
+<section id="thread" aria-label="建模对话"></section>
+</main>
+<script>
+const form = document.querySelector("#chat");
+const drop = document.querySelector("#drop");
+const fileLabel = document.querySelector("#file-label");
+const hint = document.querySelector("#hint");
+const thread = document.querySelector("#thread");
+const send = document.querySelector("#send");
+let file, previous, lastFilename;
+function choose(candidate) {
+  if (!candidate) return;
+  if (!/\.pdf$/i.test(candidate.name)) {
+    hint.textContent = "请选择 PDF 文件";
+    return;
+  }
+  file = candidate;
+  fileLabel.textContent = candidate.name;
+  hint.textContent = previous ? "发送后使用这张新图纸" : "已添加图纸";
+}
+form.elements.pdf.onchange = event => choose(event.target.files[0]);
+for (const event of ["dragenter","dragover"]) drop.addEventListener(event, e => {
+  e.preventDefault();
+  drop.classList.add("over");
+});
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", event => {
+  event.preventDefault();
+  drop.classList.remove("over");
+  choose(event.dataTransfer.files[0]);
+});
+function message(role, content) {
+  const card = document.createElement("article");
+  card.className = "message " + role;
+  const title = document.createElement("strong");
+  title.textContent = role === "user" ? "你" : "建模 Agent";
+  const body = document.createElement("p");
+  body.textContent = content;
+  if (role !== "user") body.setAttribute("role","status");
+  card.append(title, body);
+  thread.append(card);
+  return {card, body};
+}
+async function readJson(response) {
+  if (response.ok) return response.json();
+  const doc = new DOMParser().parseFromString(await response.text(), "text/html");
+  throw Error(doc.querySelector("p")?.textContent || "请求失败");
+}
+function showResult(card, body, job, url) {
+  body.textContent = job.text_only
+    ? "模型已交付，几何通过 Agent 验收。当前模型为文本模式，视图待人工检查。"
+    : "模型已交付，几何和视图通过 Agent 验收。";
+  const image = document.createElement("img");
+  image.src = url + "/preview";
+  image.alt = "Zemax 模型轴测图";
+  const path = document.createElement("code");
+  path.textContent = job.model_path;
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const download = document.createElement("a");
+  download.href = url + "/model";
+  download.className = "button";
+  download.textContent = "下载 .zos";
+  const copy = document.createElement("button");
+  copy.textContent = "复制本机路径";
+  copy.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(job.model_path);
+      copy.textContent = "已复制";
+    } catch {
+      copy.textContent = "请选中路径复制";
+    }
+  };
+  actions.append(download, copy);
+  card.append(image, path, actions);
+}
+const stages = {QUEUED:"排队中",PREFLIGHT:"准备图纸",SPEC_VALIDATED:"方案已校验",
+  REQUEST_READY:"正在构建模型",EXECUTED:"模型已构建",VISUAL_PASS:"正在检查几何和视图",
+  RETRY:"正在返修",GATE_FAILED:"验收发现差异，正在处理",PIPELINE_FAILED:"构建失败，正在处理"};
+form.onsubmit = async event => {
+  event.preventDefault();
+  if (!file && !previous) {
+    hint.textContent = "请先添加 PDF 图纸";
+    return;
+  }
+  const data = new FormData(form);
+  data.delete("pdf");
+  if (file) data.append("pdf", file);
+  else data.append("previous", previous);
+  message("user", data.get("prompt") + "\n" + (file?.name || lastFilename));
+  const {card, body} = message("agent", "正在提交");
+  send.disabled = true;
+  try {
+    const {id} = await readJson(await fetch("/api/agent/chat", {method:"POST", body:data}));
+    lastFilename = file?.name || lastFilename;
+    previous = id;
+    file = undefined;
+    form.elements.pdf.value = "";
+    form.elements.prompt.value = "";
+    fileLabel.textContent = "沿用 " + lastFilename + " · 拖入或点击换图纸";
+    hint.textContent = "可继续发送要求，更新当前模型";
+    const url = "/api/agent/jobs/" + id;
+    const attachments = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "建模过程文件";
+    const list = document.createElement("ul");
+    attachments.append(summary, list);
+    card.append(attachments);
+    attachments.hidden = true;
+    const shown = new Set();
+    let questionForm, questionId;
+    while (true) {
+      const job = await readJson(await fetch(url));
+      for (const item of job.inputs || []) {
+        const path = item.attempt + "/" + item.name;
+        if (shown.has(path)) continue;
+        shown.add(path);
+        const row = document.createElement("li");
+        const link = document.createElement("a");
+        link.href = url + "/inputs/" + path;
+        link.textContent = "第 " + Number(item.attempt.split("_")[1]) + " 轮 · " + item.label;
+        row.append(link);
+        list.append(row);
+        attachments.hidden = false;
+      }
+      if (job.status === "QUESTION") {
+        body.textContent = job.question;
+        if (questionId !== job.question_id) {
+          questionId = job.question_id;
+          questionForm = document.createElement("form");
+          const input = document.createElement("input");
+          input.placeholder = "输入尺寸或补充说明";
+          input.setAttribute("aria-label", "回答 Agent");
+          input.required = true;
+          input.maxLength = 4000;
+          const reply = document.createElement("button");
+          reply.textContent = "提交回答";
+          const note = document.createElement("p");
+          note.textContent = "30 秒内可回答，超时后 Agent 会记录假设并继续。";
+          questionForm.append(input, reply, note);
+          card.append(questionForm);
+          input.focus();
+          questionForm.onsubmit = async event => {
+            event.preventDefault();
+            reply.disabled = true;
+            try {
+              await readJson(await fetch(url + "/answer", {method:"POST",
+                headers:{"Content-Type":"application/json"},
+                body:JSON.stringify({question_id:questionId, answer:input.value})}));
+              note.textContent = "回答已收到。";
+            } catch (error) {
+              note.textContent = error.message;
+              reply.disabled = false;
+            }
+          };
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        continue;
+      }
+      questionForm?.remove();
+      questionForm = undefined;
+      for (const [index, turn] of (job.clarifications || []).entries()) {
+        if (shown.has("question-" + index)) continue;
+        shown.add("question-" + index);
+        const transcript = document.createElement("p");
+        transcript.textContent = "追问 · " + turn.question + "\n" +
+          (turn.answer ? "你的回答 · " + turn.answer : "回答超时，Agent 已继续。");
+        card.insertBefore(transcript, attachments);
+      }
+      if (job.status === "PASS") {
+        showResult(card, body, job, url);
+        break;
+      }
+      if (job.status === "FAIL") {
+        body.textContent = "建模失败 · " + job.error;
+        break;
+      }
+      const stage = stages[job.stage || job.status] || "正在建模";
+      body.textContent = stage + (job.attempt ? " · 第 " + job.attempt + " 轮" : "");
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+  } catch (error) {
+    body.textContent = error.message;
+  } finally {
+    send.disabled = false;
+  }
+};
+</script>
+</body>
+</html>

@@ -93,3 +93,13 @@ $env:ZEMAX_GATEWAY_KEY = Read-Host 'API key' -MaskInput
 4. GPT 审核图纸与证据。若未通过，LangGraph 按预算尝试下一候选或把失败反馈交给模型修订。含估算的通过结果在验收报告中标记为 approximate。
 
 启动失败时检查 attempts 中的 agent.log。找不到 DLL 时核对 OPTICSTUDIO_INSTALL。无法创建 ZOSAPI 实例时，先用相同 Windows 用户打开 OpticStudio 核对许可证。遇到 API 401、404、429 或超时时，检查密钥、服务路径、模型部署及限流。可以用 ZEMAX_GATEWAY_TIMEOUT_SECONDS 调整单次网络请求时限。报告与审计记录包含当次图纸及模型数据，发布评测产物前请确认可公开。
+
+## Local web interface
+
+After installing the same dependencies, run:
+
+```powershell
+python -m agent_langgraph.web
+```
+
+Open http://127.0.0.1:8765 to upload a PDF, enter your modeling instructions, and configure the provider URL, API key, and model. The interface displays clarification questions and links to the verified model and preview when a job passes. The stepped-bore and section-measurement tools are available on the Responses API route.

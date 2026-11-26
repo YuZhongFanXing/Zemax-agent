@@ -9,7 +9,7 @@ from make_views import render_views, section_evidence
 from zos_runner import digest, load_api, new_application, write_json
 
 
-def collect(model, object_id, output):
+def read_native_mesh(model, object_id):
     api = load_api()
     app = new_application(api)
     try:
@@ -46,6 +46,11 @@ def collect(model, object_id, output):
     mesh.fix_normals()
     if not np.all(mesh.extents > 0) or not np.any(mesh.area_faces > 0):
         raise RuntimeError("native_mesh_degenerate")
+    return mesh
+
+
+def collect(model, object_id, output):
+    mesh = read_native_mesh(model, object_id)
     output.mkdir(parents=True, exist_ok=True)
     paths = render_views(mesh, output / "native_views", face_views=True)
     write_json(output / "native_geometry_evidence.json", {
@@ -58,10 +63,43 @@ def collect(model, object_id, output):
     })
 
 
+def collect_section(model, object_id, output, axis, coordinate):
+    from matplotlib import pyplot as plt
+
+    model_hash = digest(model)
+    mesh = read_native_mesh(model, object_id)
+    if digest(model) != model_hash:
+        raise ValueError("Model changed during section measurement")
+    normal = np.eye(3)["XYZ".index(axis)]
+    section = mesh.section(plane_origin=normal * coordinate, plane_normal=normal)
+    axes = [i for i, name in enumerate("XYZ") if name != axis]
+    loops = [] if section is None else [path[:, axes] for path in section.discrete]
+    status = "empty" if section is None else "open" if not section.is_closed or not loops else "closed"
+    if loops:
+        figure, plot = plt.subplots()
+        try:
+            for loop in loops:
+                plot.plot(*loop.T)
+            plot.set_aspect("equal")
+            plot.set_xlabel("XYZ"[axes[0]] + " (mm)")
+            plot.set_ylabel("XYZ"[axes[1]] + " (mm)")
+            figure.savefig(output.with_suffix(".png"), dpi=140)
+        finally:
+            plt.close(figure)
+    write_json(output, {"model_sha256": model_hash, "status": status, "axis": axis,
+                        "coordinate_mm": coordinate, "outline_axes": "".join("XYZ"[i] for i in axes),
+                        "outline_points_mm": [loop.round(6).tolist() for loop in loops]})
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", type=Path)
     parser.add_argument("object_id", type=int)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--section", nargs=2, metavar=("AXIS", "COORDINATE"))
     args = parser.parse_args()
-    collect(args.model.resolve(), args.object_id, args.output.resolve())
+    if args.section:
+        axis, coordinate = args.section
+        collect_section(args.model.resolve(), args.object_id, args.output.resolve(), axis, float(coordinate))
+    else:
+        collect(args.model.resolve(), args.object_id, args.output.resolve())

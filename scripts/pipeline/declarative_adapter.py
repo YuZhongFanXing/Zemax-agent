@@ -134,18 +134,40 @@ def readback(system, api, request, build_metadata):
     checks = []
     for expected in build_metadata["objects"]:
         row = system.NCE.GetObjectAt(expected["index"])
+        # Object snapshot adapted from Zemax MCP Server NSCSubsystem._snapshot
+        # (193598e4ca6224dfa8615565d5e3b6f3cfa6d149, LICENSE.zemax-mcp).
         actual_type = str(row.Type)
-        valid = actual_type == expected["type"] and str(row.Comment) == expected["expression"]
-        valid &= all(math.isclose(actual, target, abs_tol=1e-8) for actual,target in
-                     zip((row.XPosition,row.YPosition,row.ZPosition),expected["position"]))
-        if "rotation" in expected:
-            actual_rotation = (row.TiltAboutX, row.TiltAboutY, row.TiltAboutZ)
-            valid &= all(abs((actual - target + 180) % 360 - 180) <= 1e-8
-                         for actual, target in zip(actual_rotation, expected["rotation"]))
-        for column,value in expected["params"].items():
-            cell = row.GetObjectCell(getattr(columns,column))
+        position = [row.XPosition, row.YPosition, row.ZPosition]
+        rotation = [row.TiltAboutX, row.TiltAboutY, row.TiltAboutZ]
+        expression = str(row.Comment)
+        mismatches = []
+        if actual_type != expected["type"]:
+            mismatches.append("type")
+        if expression != expected["expression"]:
+            mismatches.append("expression")
+        if not all(math.isclose(actual, target, abs_tol=1e-8)
+                   for actual, target in zip(position, expected["position"])):
+            mismatches.append("position")
+        if "rotation" in expected and not all(
+            abs((actual - target + 180) % 360 - 180) <= 1e-8
+            for actual, target in zip(rotation, expected["rotation"])
+        ):
+            mismatches.append("rotation")
+        parameters = {}
+        for column, target in expected["params"].items():
+            cell = row.GetObjectCell(getattr(columns, column))
             actual = cell.IntegerValue if actual_type == "BooleanNative" else cell.DoubleValue
-            valid &= math.isclose(actual,value,abs_tol=1e-8)
-        checks.append({"index":expected["index"],"type":actual_type,"pass":bool(valid)})
+            parameters[column] = actual
+            if not math.isclose(actual, target, abs_tol=1e-8):
+                mismatches.append(column)
+        checks.append({
+            "index": expected["index"],
+            "type": actual_type,
+            "pass": not mismatches,
+            "expected": expected,
+            "actual": {"type": actual_type, "expression": expression,
+                       "position": position, "rotation": rotation, "params": parameters},
+            "mismatches": mismatches,
+        })
     return {"pass":all(item["pass"] for item in checks),"objects":checks,
             "object_type":checks[-1]["type"],"final_object_id":build_metadata["final_object_id"]}

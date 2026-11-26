@@ -190,6 +190,9 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
                 from .responses import ADAPTER
                 adapter = ADAPTER
                 prompt = "Create a native OpticStudio model of every feature supported by the drawing."
+                if state.get("user_prompt"):
+                    prompt += "\nUser modeling instructions (later messages take priority):\n" + state["user_prompt"]
+                instructions = prompt
                 for number in range(1, state["max_attempts"] + 1):
                     try:
                         planner.invoke(prompt, workspace, f"llm_prepare_{number:02d}", pdf)
@@ -198,7 +201,7 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
                     except (ValueError, TypeError, KeyError) as exc:
                         if number == state["max_attempts"] or budget_exhausted(state):
                             raise
-                        prompt = f"Correct this plan validation error: {exc}"
+                        prompt = f"{instructions}\nCorrect this plan validation error: {exc}"
             elif not (spec.exists() and adapter.exists()):
                 prompt = harness_job.instruction() if harness_job else _prepare_prompt(pdf, workspace)
                 planner.invoke(prompt, workspace, "llm_prepare", pdf)
@@ -258,6 +261,9 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
                 "history": _history(state, "REQUEST_READY", attempt=attempt)}
 
     def execute(state: GraphState) -> GraphState:
+        if budget_exhausted(state):
+            return {"status": "FAIL", "error": "time_budget_exhausted",
+                    "history": _history(state, "TIME_BUDGET_EXHAUSTED")}
         log = Path(state["attempt_dir"]) / "agent.log"
         try:
             request = Path(state["request_path"])
@@ -281,6 +287,11 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
         return {"status": "VISUAL_PASS", "history": _history(state, event)}
 
     def inspect(state: GraphState) -> GraphState:
+        if state.get("status") == "FAIL":
+            return state
+        if budget_exhausted(state):
+            return {"status": "FAIL", "error": "time_budget_exhausted",
+                    "history": _history(state, "TIME_BUDGET_EXHAUSTED")}
         attempt = Path(state["attempt_dir"])
         if declarative and state.get("status") == "VISUAL_PASS":
             try:
@@ -327,7 +338,10 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
                 "history": _history(state, "GATES_PASS" if passed else "GATES_FAIL", gates=gates)}
 
     def repair(state: GraphState) -> GraphState:
-        if state.get("attempt", 0) >= state.get("max_attempts", 8) or budget_exhausted(state):
+        if budget_exhausted(state):
+            return {"status": "FAIL", "error": "time_budget_exhausted",
+                    "history": _history(state, "TIME_BUDGET_EXHAUSTED")}
+        if state.get("attempt", 0) >= state.get("max_attempts", 8):
             return {"status": "FAIL", "error": "attempt_budget_exhausted"}
         if declarative:
             strategy = state["strategy"]
@@ -340,6 +354,12 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
         if log.is_file():
             evidence += "\n" + log.read_text(encoding="utf-8", errors="replace")[-16000:]
         if declarative:
+            readback = log.with_name("native_readback_failure.json")
+            if readback.is_file():
+                failed = read_json(readback).get("model", {}).get("objects", [])
+                evidence += "\nNative object readback mismatches:\n" + json.dumps(
+                    [item for item in failed if item.get("pass") is False]
+                )[:16000]
             verification = log.with_name("verification.json")
             if verification.is_file():
                 evidence += "\n" + verification.read_text(encoding="utf-8")[-16000:]
@@ -347,6 +367,8 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
             prompt = (f"Correct the current modeling plan using this execution error:\n{evidence}"
                       if declarative else harness_job.instruction(evidence) if harness_job else _repair_prompt(state, evidence))
             if declarative:
+                if state.get("user_prompt"):
+                    prompt += "\nUser modeling instructions:\n" + state["user_prompt"]
                 for correction in range(2):
                     planner.invoke(prompt, Path(state["workspace"]),
                                    f"llm_repair_{state['attempt']:02d}_{correction + 1}",
@@ -372,6 +394,9 @@ def build_graph(planner: Planner | None = None, *, harness_job=None):
                     "history": _history(state, "REPAIR_FAILED", error=str(exc))}
 
     def finalize(state: GraphState) -> GraphState:
+        if budget_exhausted(state):
+            return {"status": "FAIL", "error": "time_budget_exhausted",
+                    "history": _history(state, "TIME_BUDGET_EXHAUSTED")}
         workspace = Path(state["workspace"])
         final = workspace / "final"
         if final.exists():

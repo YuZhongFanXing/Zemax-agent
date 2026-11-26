@@ -5,6 +5,7 @@ from typing import Any, TypedDict
 
 class GraphState(TypedDict, total=False):
     pdf: str
+    user_prompt: str
     workspace: str
     max_attempts: int
     max_minutes: float
